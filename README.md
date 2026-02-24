@@ -31,6 +31,11 @@
    - 溢价 Top10 表
    - 折价 Top10 表
 
+## 常见问题排查
+- Actions 失败且报 `缺少环境变量 FEISHU_WEBHOOK_URL`：说明仓库 Secret 未配置或名称不对。
+- Actions 显示 HTTP 成功但无消息：查看日志中 `飞书业务返回失败`，通常是 webhook 无效、机器人权限/安全策略（如关键词）不满足。
+- 机器人在飞书群不可见：确认机器人仍在目标群、未被停用，且 webhook 是该群对应的地址。
+
 ## 目录
 - `src/run.py`: 数据抓取、计算、卡片构建、推送逻辑
 - `.github/workflows/lof.yml`: 定时/手动触发的 GitHub Actions 工作流

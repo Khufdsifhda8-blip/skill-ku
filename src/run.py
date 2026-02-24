@@ -1,5 +1,6 @@
 import datetime as dt
 import os
+import time
 from typing import Tuple
 
 import akshare as ak
@@ -9,10 +10,19 @@ import requests
 
 def get_lof_df() -> pd.DataFrame:
     """Fetch LOF real-time spot data and normalize required columns."""
-    try:
-        df = ak.fund_lof_spot_em()
-    except Exception as exc:
-        raise RuntimeError(f"拉取 LOF 实时行情失败: {exc}") from exc
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            print(f"[INFO] 拉取 LOF 实时行情（尝试 {attempt}/3）...")
+            df = ak.fund_lof_spot_em()
+            print(f"[INFO] 拉取完成，原始行数: {len(df)}")
+            break
+        except Exception as exc:
+            last_err = exc
+            if attempt < 3:
+                time.sleep(2)
+    else:
+        raise RuntimeError(f"拉取 LOF 实时行情失败（已重试 3 次）: {last_err}") from last_err
 
     rename_map = {
         "代码": "code",
@@ -44,6 +54,7 @@ def get_lof_df() -> pd.DataFrame:
         )
 
     df["premium_pct"] = (df["price"] / df["iopv"] - 1.0) * 100.0
+    print(f"[INFO] 清洗后有效行数: {after}")
     return df
 
 
@@ -132,10 +143,35 @@ def build_feishu_card(
 
 def feishu_post(webhook: str, payload: dict) -> None:
     try:
+        print("[INFO] 正在推送飞书卡片...")
         resp = requests.post(webhook, json=payload, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as exc:
         raise RuntimeError(f"飞书 webhook 推送失败: {exc}") from exc
+
+    try:
+        body = resp.json()
+    except ValueError:
+        print("[WARN] 飞书返回非 JSON，按 HTTP 状态视为成功")
+        return
+
+    # Feishu webhook commonly returns one of:
+    # {"code": 0, "msg": "success"} or {"StatusCode": 0, "StatusMessage": "success"}
+    if "code" in body:
+        code = body.get("code")
+        if code != 0:
+            raise RuntimeError(
+                f"飞书业务返回失败: code={code}, msg={body.get('msg')}, body={body}"
+            )
+    elif "StatusCode" in body:
+        code = body.get("StatusCode")
+        if code != 0:
+            raise RuntimeError(
+                "飞书业务返回失败: "
+                f"StatusCode={code}, StatusMessage={body.get('StatusMessage')}, body={body}"
+            )
+
+    print(f"[INFO] 飞书推送完成，返回: {body}")
 
 
 def main() -> None:
@@ -146,9 +182,14 @@ def main() -> None:
     tz = dt.timezone(dt.timedelta(hours=8))
     now = dt.datetime.now(tz)
     push_time_cn = now.strftime("%Y-%m-%d %H:%M")
+    print(f"[INFO] 当前北京时间: {push_time_cn}")
 
     df = get_lof_df()
     premium_top, discount_top = top_tables(df, n=10)
+    print(
+        "[INFO] Top10 计算完成: "
+        f"premium={len(premium_top)} 条, discount={len(discount_top)} 条"
+    )
 
     premium_md = clamp_markdown(df_to_markdown_table(premium_top), limit=12000)
     discount_md = clamp_markdown(df_to_markdown_table(discount_top), limit=12000)
@@ -159,6 +200,7 @@ def main() -> None:
         premium_table_md=premium_md,
         discount_table_md=discount_md,
     )
+    print("[INFO] 卡片构建完成")
     feishu_post(webhook, payload)
 
 
