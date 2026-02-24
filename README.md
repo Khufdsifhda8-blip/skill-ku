@@ -4,6 +4,7 @@
 
 ## 功能
 - 拉取 A 股全部 LOF 场内基金实时行情（AKShare/东方财富）
+- 若 LOF 实时行情接口未直接提供 IOPV，则自动使用东方财富净值估算接口回填
 - 计算折溢价：`premium_pct = (price / iopv - 1) * 100`
 - 生成两张 Top10 表：
   - 溢价 Top10（`premium_pct` 降序）

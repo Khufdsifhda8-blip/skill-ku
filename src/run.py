@@ -8,6 +8,71 @@ import pandas as pd
 import requests
 
 
+def _pick_column(columns: list, keyword: str) -> str:
+    for col in columns:
+        if keyword in str(col):
+            return str(col)
+    return ""
+
+
+def get_lof_iopv_fallback_df(codes: pd.Series) -> pd.DataFrame:
+    """
+    Fetch LOF estimated NAV (used as IOPV fallback) from Eastmoney valuation API.
+    """
+    symbols = ("LOF", "场内交易基金")
+    frames = []
+    code_set = set(codes.astype(str).str.zfill(6).tolist())
+
+    for symbol in symbols:
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                print(f"[INFO] 拉取 {symbol} 净值估算（尝试 {attempt}/3）...")
+                est_df = ak.fund_value_estimation_em(symbol=symbol)
+                break
+            except Exception as exc:
+                last_err = exc
+                if attempt < 3:
+                    time.sleep(2)
+        else:
+            print(f"[WARN] 拉取 {symbol} 净值估算失败: {last_err}")
+            continue
+
+        if est_df.empty:
+            print(f"[WARN] {symbol} 净值估算返回空数据")
+            continue
+
+        code_col = _pick_column(list(est_df.columns), "基金代码")
+        iopv_col = _pick_column(list(est_df.columns), "估算数据-估算值")
+        if not code_col or not iopv_col:
+            print(
+                f"[WARN] {symbol} 净值估算缺少关键列: code_col={code_col}, "
+                f"iopv_col={iopv_col}, 实际列={list(est_df.columns)}"
+            )
+            continue
+
+        tmp = est_df[[code_col, iopv_col]].copy()
+        tmp.columns = ["code", "iopv_fallback"]
+        tmp["code"] = tmp["code"].astype(str).str.extract(r"(\d{6})", expand=False)
+        tmp["code"] = tmp["code"].str.zfill(6)
+        tmp["iopv_fallback"] = pd.to_numeric(tmp["iopv_fallback"], errors="coerce")
+        tmp = tmp[tmp["code"].isin(code_set)]
+        tmp = tmp.dropna(subset=["code"]).drop_duplicates("code")
+        tmp = tmp[tmp["iopv_fallback"] > 0]
+        if not tmp.empty:
+            frames.append(tmp)
+            print(f"[INFO] {symbol} 净值估算可用条数: {len(tmp)}")
+        else:
+            print(f"[WARN] {symbol} 净值估算无可用 IOPV")
+
+    if not frames:
+        return pd.DataFrame(columns=["code", "iopv_fallback"])
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates("code", keep="first")
+    return merged
+
+
 def get_lof_df() -> pd.DataFrame:
     """Fetch LOF real-time spot data and normalize required columns."""
     last_err = None
@@ -32,7 +97,7 @@ def get_lof_df() -> pd.DataFrame:
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    required = {"code", "name", "price", "iopv"}
+    required = {"code", "name", "price"}
     missing = required - set(df.columns)
     if missing:
         raise RuntimeError(
@@ -40,9 +105,26 @@ def get_lof_df() -> pd.DataFrame:
             f"{sorted(missing)}; 实际字段: {list(df.columns)}"
         )
 
+    if "iopv" not in df.columns:
+        print("[WARN] LOF 行情接口未返回 IOPV 列，启用净值估算回填")
+        df["iopv"] = pd.NA
+
     df = df[["code", "name", "price", "iopv"]].copy()
+    df["code"] = df["code"].astype(str).str.zfill(6)
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df["iopv"] = pd.to_numeric(df["iopv"], errors="coerce")
+
+    iopv_missing_before = int(df["iopv"].isna().sum())
+    fallback_df = get_lof_iopv_fallback_df(df["code"])
+    if not fallback_df.empty:
+        df = df.merge(fallback_df, on="code", how="left")
+        df["iopv"] = df["iopv"].fillna(df["iopv_fallback"])
+        df = df.drop(columns=["iopv_fallback"])
+    iopv_missing_after = int(df["iopv"].isna().sum())
+    print(
+        "[INFO] IOPV 回填统计: "
+        f"回填前缺失={iopv_missing_before}, 回填后缺失={iopv_missing_after}"
+    )
 
     before = len(df)
     df = df.dropna(subset=["price", "iopv"])
