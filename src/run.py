@@ -207,79 +207,200 @@ def top_tables(df: pd.DataFrame, n: int = 10) -> Tuple[pd.DataFrame, pd.DataFram
     return premium_top, discount_top
 
 
-def df_to_markdown_table(df: pd.DataFrame) -> str:
-    """Render markdown without extra dependencies (no tabulate needed)."""
+def truncate_name(name: str, limit: int = 12) -> str:
+    text = "" if name is None else str(name).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def build_table_rows(df: pd.DataFrame, max_rows: int = 10) -> list[dict]:
     view = df[["code", "name", "price", "iopv", "premium_pct"]].copy()
+    view["code"] = view["code"].astype(str).str.zfill(6)
+    view["name"] = view["name"].map(lambda v: truncate_name(v, limit=12))
     view["price"] = view["price"].map(lambda v: f"{v:.4f}")
     view["iopv"] = view["iopv"].map(lambda v: f"{v:.4f}")
     view["premium_pct"] = view["premium_pct"].map(lambda v: f"{v:+.2f}%")
 
-    headers = ["code", "name", "price", "iopv", "premium_pct"]
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "| --- | --- | --- | --- | --- |",
-    ]
+    rows = []
+    for _, row in view.head(max_rows).iterrows():
+        rows.append(
+            {
+                "code": str(row["code"]),
+                "name": str(row["name"]),
+                "price": str(row["price"]),
+                "iopv": str(row["iopv"]),
+                "premium_pct": str(row["premium_pct"]),
+            }
+        )
 
-    for _, row in view.iterrows():
-        cells = [str(row[h]).replace("|", "\\|") for h in headers]
-        lines.append("| " + " | ".join(cells) + " |")
+    while len(rows) < max_rows:
+        rows.append(
+            {
+                "code": "-",
+                "name": "-",
+                "price": "-",
+                "iopv": "-",
+                "premium_pct": "-",
+            }
+        )
+    return rows
 
-    return "\n".join(lines)
 
-
-def clamp_markdown(md: str, limit: int = 12000) -> str:
-    if len(md) <= limit:
-        return md
-    return md[:limit] + "\n\n（表格过长，已截断）"
+def build_table_component(df: pd.DataFrame, max_rows: int = 10) -> dict:
+    return {
+        "tag": "table",
+        "page_size": max_rows,
+        "row_height": "low",
+        "header_style": {
+            "text_align": "left",
+            "text_size": "normal",
+            "background_style": "none",
+            "text_color": "grey",
+            "bold": True,
+            "lines": 1,
+        },
+        "columns": [
+            {
+                "name": "code",
+                "display_name": "代码",
+                "data_type": "text",
+                "horizontal_align": "left",
+                "vertical_align": "center",
+                "width": "84px",
+            },
+            {
+                "name": "name",
+                "display_name": "名称",
+                "data_type": "text",
+                "horizontal_align": "left",
+                "vertical_align": "center",
+                "width": "132px",
+            },
+            {
+                "name": "price",
+                "display_name": "市价",
+                "data_type": "text",
+                "horizontal_align": "left",
+                "vertical_align": "center",
+                "width": "96px",
+            },
+            {
+                "name": "iopv",
+                "display_name": "IOPV",
+                "data_type": "text",
+                "horizontal_align": "left",
+                "vertical_align": "center",
+                "width": "96px",
+            },
+            {
+                "name": "premium_pct",
+                "display_name": "折溢价",
+                "data_type": "text",
+                "horizontal_align": "left",
+                "vertical_align": "center",
+                "width": "96px",
+            },
+        ],
+        "rows": build_table_rows(df, max_rows=max_rows),
+    }
 
 
 def build_feishu_card(
     title: str,
     push_time_cn: str,
-    premium_table_md: str,
-    discount_table_md: str,
+    sample_count: int,
+    premium_top: pd.DataFrame,
+    discount_top: pd.DataFrame,
 ) -> dict:
+    max_premium = premium_top["premium_pct"].iloc[0] if not premium_top.empty else float("nan")
+    max_discount = discount_top["premium_pct"].iloc[0] if not discount_top.empty else float("nan")
+    max_premium_text = f"{max_premium:+.2f}%" if pd.notna(max_premium) else "N/A"
+    max_discount_text = f"{max_discount:+.2f}%" if pd.notna(max_discount) else "N/A"
+
     return {
         "msg_type": "interactive",
         "card": {
-            "config": {"wide_screen_mode": True},
+            "schema": "2.0",
+            "config": {
+                "wide_screen_mode": True,
+                "width_mode": "fill",
+                "enable_forward": True,
+                "update_multi": True,
+            },
             "header": {
                 "title": {"tag": "plain_text", "content": title},
+                "subtitle": {"tag": "plain_text", "content": "工作日 14:20 自动推送"},
                 "template": "blue",
             },
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
                         "content": (
-                            "**A股 LOF 场内基金折溢价榜**\n\n"
-                            f"- 推送时间（北京时间）: {push_time_cn}\n"
-                            "- 定时规则: 工作日 14:20（UTC 06:20）"
+                            "**关键指标**  \n"
+                            f"时间：{push_time_cn}（北京时间） ｜ "
+                            f"样本数：{sample_count} ｜ "
+                            f"最大溢价：{max_premium_text} ｜ "
+                            f"最大折价：{max_discount_text}"
                         ),
+                        "text_align": "left",
                     },
-                },
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": "**溢价 Top10（premium_pct 最高）**"},
-                },
-                {"tag": "div", "text": {"tag": "lark_md", "content": premium_table_md}},
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": "**折价 Top10（premium_pct 最低）**"},
-                },
-                {"tag": "div", "text": {"tag": "lark_md", "content": discount_table_md}},
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": "_数据来源：AKShare/东方财富（LOF 场内实时行情）_",
+                    {"tag": "hr"},
+                    {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "horizontal_spacing": "medium",
+                        "columns": [
+                            {
+                                "tag": "column",
+                                "width": "weighted",
+                                "weight": 1,
+                                "vertical_align": "top",
+                                "elements": [
+                                    {
+                                        "tag": "div",
+                                        "text": {
+                                            "tag": "plain_text",
+                                            "content": "溢价 Top10",
+                                            "text_size": "normal",
+                                            "text_color": "default",
+                                        },
+                                    },
+                                    build_table_component(premium_top, max_rows=10),
+                                ],
+                            },
+                            {
+                                "tag": "column",
+                                "width": "weighted",
+                                "weight": 1,
+                                "vertical_align": "top",
+                                "elements": [
+                                    {
+                                        "tag": "div",
+                                        "text": {
+                                            "tag": "plain_text",
+                                            "content": "折价 Top10",
+                                            "text_size": "normal",
+                                            "text_color": "default",
+                                        },
+                                    },
+                                    build_table_component(discount_top, max_rows=10),
+                                ],
+                            },
+                        ],
                     },
-                },
-            ],
+                    {"tag": "hr"},
+                    {
+                        "tag": "markdown",
+                        "content": (
+                            "口径：`premium_pct=(price/IOPV-1)*100`  \n"
+                            "数据：AKShare/东方财富 LOF 场内实时行情"
+                        ),
+                        "text_align": "left",
+                    },
+                ]
+            },
         },
     }
 
@@ -334,14 +455,12 @@ def main() -> None:
         f"premium={len(premium_top)} 条, discount={len(discount_top)} 条"
     )
 
-    premium_md = clamp_markdown(df_to_markdown_table(premium_top), limit=12000)
-    discount_md = clamp_markdown(df_to_markdown_table(discount_top), limit=12000)
-
     payload = build_feishu_card(
         title="LOF 折溢价 Top10",
         push_time_cn=push_time_cn,
-        premium_table_md=premium_md,
-        discount_table_md=discount_md,
+        sample_count=len(df),
+        premium_top=premium_top,
+        discount_top=discount_top,
     )
     print("[INFO] 卡片构建完成")
     feishu_post(webhook, payload)
