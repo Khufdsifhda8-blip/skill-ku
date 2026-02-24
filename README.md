@@ -4,7 +4,9 @@
 
 ## 功能
 - 拉取 A 股全部 LOF 场内基金实时行情（AKShare/东方财富）
-- 若 LOF 实时行情接口未直接提供 IOPV，则自动使用东方财富净值估算接口回填
+- 若 LOF 实时行情接口未直接提供 IOPV，则自动回填：
+  - 先用东方财富净值估算（`fund_value_estimation_em`）
+  - 再用开放式基金单位净值（`fund_open_fund_daily_em`）兜底
 - 计算折溢价：`premium_pct = (price / iopv - 1) * 100`
 - 生成两张 Top10 表：
   - 溢价 Top10（`premium_pct` 降序）

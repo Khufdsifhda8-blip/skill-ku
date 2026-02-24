@@ -15,7 +15,7 @@ def _pick_column(columns: list, keyword: str) -> str:
     return ""
 
 
-def get_lof_iopv_fallback_df(codes: pd.Series) -> pd.DataFrame:
+def get_lof_estimation_fallback_df(codes: pd.Series) -> pd.DataFrame:
     """
     Fetch LOF estimated NAV (used as IOPV fallback) from Eastmoney valuation API.
     """
@@ -52,13 +52,13 @@ def get_lof_iopv_fallback_df(codes: pd.Series) -> pd.DataFrame:
             continue
 
         tmp = est_df[[code_col, iopv_col]].copy()
-        tmp.columns = ["code", "iopv_fallback"]
+        tmp.columns = ["code", "iopv_est"]
         tmp["code"] = tmp["code"].astype(str).str.extract(r"(\d{6})", expand=False)
         tmp["code"] = tmp["code"].str.zfill(6)
-        tmp["iopv_fallback"] = pd.to_numeric(tmp["iopv_fallback"], errors="coerce")
+        tmp["iopv_est"] = pd.to_numeric(tmp["iopv_est"], errors="coerce")
         tmp = tmp[tmp["code"].isin(code_set)]
         tmp = tmp.dropna(subset=["code"]).drop_duplicates("code")
-        tmp = tmp[tmp["iopv_fallback"] > 0]
+        tmp = tmp[tmp["iopv_est"] > 0]
         if not tmp.empty:
             frames.append(tmp)
             print(f"[INFO] {symbol} 净值估算可用条数: {len(tmp)}")
@@ -66,11 +66,61 @@ def get_lof_iopv_fallback_df(codes: pd.Series) -> pd.DataFrame:
             print(f"[WARN] {symbol} 净值估算无可用 IOPV")
 
     if not frames:
-        return pd.DataFrame(columns=["code", "iopv_fallback"])
+        return pd.DataFrame(columns=["code", "iopv_est"])
 
     merged = pd.concat(frames, ignore_index=True)
     merged = merged.drop_duplicates("code", keep="first")
     return merged
+
+
+def get_lof_open_nav_fallback_df(codes: pd.Series) -> pd.DataFrame:
+    """
+    Fallback to open-fund daily unit NAV when valuation estimate is unavailable.
+    """
+    code_set = set(codes.astype(str).str.zfill(6).tolist())
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            print(f"[INFO] 拉取开放式基金净值（尝试 {attempt}/3）...")
+            nav_df = ak.fund_open_fund_daily_em()
+            break
+        except Exception as exc:
+            last_err = exc
+            if attempt < 3:
+                time.sleep(2)
+    else:
+        print(f"[WARN] 拉取开放式基金净值失败: {last_err}")
+        return pd.DataFrame(columns=["code", "iopv_nav"])
+
+    if nav_df.empty:
+        print("[WARN] 开放式基金净值返回空数据")
+        return pd.DataFrame(columns=["code", "iopv_nav"])
+
+    code_col = _pick_column(list(nav_df.columns), "基金代码")
+    nav_cols = [c for c in nav_df.columns if "单位净值" in str(c)]
+    if not code_col or not nav_cols:
+        print(
+            f"[WARN] 开放式基金净值缺少关键列: code_col={code_col}, "
+            f"nav_cols={nav_cols}, 实际列={list(nav_df.columns)}"
+        )
+        return pd.DataFrame(columns=["code", "iopv_nav"])
+
+    tmp = nav_df[[code_col] + nav_cols].copy()
+    tmp.rename(columns={code_col: "code"}, inplace=True)
+    tmp["code"] = tmp["code"].astype(str).str.extract(r"(\d{6})", expand=False)
+    tmp["code"] = tmp["code"].str.zfill(6)
+    tmp = tmp[tmp["code"].isin(code_set)]
+
+    for col in nav_cols:
+        tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
+
+    # Prefer latest unit NAV; if missing then fallback to earlier day unit NAV.
+    tmp["iopv_nav"] = tmp[nav_cols].bfill(axis=1).iloc[:, 0]
+    tmp = tmp[["code", "iopv_nav"]]
+    tmp = tmp.dropna(subset=["code"]).drop_duplicates("code")
+    tmp = tmp[tmp["iopv_nav"] > 0]
+    print(f"[INFO] 开放式基金净值可用条数: {len(tmp)}")
+    return tmp
 
 
 def get_lof_df() -> pd.DataFrame:
@@ -115,15 +165,26 @@ def get_lof_df() -> pd.DataFrame:
     df["iopv"] = pd.to_numeric(df["iopv"], errors="coerce")
 
     iopv_missing_before = int(df["iopv"].isna().sum())
-    fallback_df = get_lof_iopv_fallback_df(df["code"])
-    if not fallback_df.empty:
-        df = df.merge(fallback_df, on="code", how="left")
-        df["iopv"] = df["iopv"].fillna(df["iopv_fallback"])
-        df = df.drop(columns=["iopv_fallback"])
-    iopv_missing_after = int(df["iopv"].isna().sum())
+
+    est_df = get_lof_estimation_fallback_df(df["code"])
+    if not est_df.empty:
+        df = df.merge(est_df, on="code", how="left")
+        df["iopv"] = df["iopv"].fillna(df["iopv_est"])
+        df = df.drop(columns=["iopv_est"])
+    iopv_missing_after_est = int(df["iopv"].isna().sum())
+
+    nav_df = get_lof_open_nav_fallback_df(df["code"])
+    if not nav_df.empty:
+        df = df.merge(nav_df, on="code", how="left")
+        df["iopv"] = df["iopv"].fillna(df["iopv_nav"])
+        df = df.drop(columns=["iopv_nav"])
+    iopv_missing_after_nav = int(df["iopv"].isna().sum())
+
     print(
         "[INFO] IOPV 回填统计: "
-        f"回填前缺失={iopv_missing_before}, 回填后缺失={iopv_missing_after}"
+        f"回填前缺失={iopv_missing_before}, "
+        f"估算回填后缺失={iopv_missing_after_est}, "
+        f"净值回填后缺失={iopv_missing_after_nav}"
     )
 
     before = len(df)
