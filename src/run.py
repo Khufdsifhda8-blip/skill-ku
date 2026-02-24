@@ -317,6 +317,16 @@ def build_feishu_card(
     max_discount = discount_top["premium_pct"].iloc[0] if not discount_top.empty else float("nan")
     max_premium_text = f"{max_premium:+.2f}%" if pd.notna(max_premium) else "N/A"
     max_discount_text = f"{max_discount:+.2f}%" if pd.notna(max_discount) else "N/A"
+    premium_leader = (
+        f"{premium_top['code'].iloc[0]} {truncate_name(premium_top['name'].iloc[0])} {max_premium_text}"
+        if not premium_top.empty
+        else "暂无数据"
+    )
+    discount_leader = (
+        f"{discount_top['code'].iloc[0]} {truncate_name(discount_top['name'].iloc[0])} {max_discount_text}"
+        if not discount_top.empty
+        else "暂无数据"
+    )
 
     return {
         "msg_type": "interactive",
@@ -349,7 +359,7 @@ def build_feishu_card(
                     {"tag": "hr"},
                     {
                         "tag": "column_set",
-                        "flex_mode": "none",
+                        "flex_mode": "bisect",
                         "horizontal_spacing": "medium",
                         "columns": [
                             {
@@ -362,12 +372,16 @@ def build_feishu_card(
                                         "tag": "div",
                                         "text": {
                                             "tag": "plain_text",
-                                            "content": "溢价 Top10",
+                                            "content": "溢价 Top10 概览",
                                             "text_size": "normal",
                                             "text_color": "default",
                                         },
                                     },
-                                    build_table_component(premium_top, max_rows=10),
+                                    {
+                                        "tag": "markdown",
+                                        "content": f"榜首：`{premium_leader}`",
+                                        "text_align": "left",
+                                    },
                                 ],
                             },
                             {
@@ -380,16 +394,40 @@ def build_feishu_card(
                                         "tag": "div",
                                         "text": {
                                             "tag": "plain_text",
-                                            "content": "折价 Top10",
+                                            "content": "折价 Top10 概览",
                                             "text_size": "normal",
                                             "text_color": "default",
                                         },
                                     },
-                                    build_table_component(discount_top, max_rows=10),
+                                    {
+                                        "tag": "markdown",
+                                        "content": f"榜首：`{discount_leader}`",
+                                        "text_align": "left",
+                                    },
                                 ],
                             },
                         ],
                     },
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "溢价 Top10",
+                            "text_size": "normal",
+                            "text_color": "default",
+                        },
+                    },
+                    build_table_component(premium_top, max_rows=10),
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "折价 Top10",
+                            "text_size": "normal",
+                            "text_color": "default",
+                        },
+                    },
+                    build_table_component(discount_top, max_rows=10),
                     {"tag": "hr"},
                     {
                         "tag": "markdown",
