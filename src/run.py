@@ -123,29 +123,85 @@ def get_lof_open_nav_fallback_df(codes: pd.Series) -> pd.DataFrame:
     return tmp
 
 
-def get_lof_df() -> pd.DataFrame:
-    """Fetch LOF real-time spot data and normalize required columns."""
-    last_err = None
-    for attempt in range(1, 4):
-        try:
-            print(f"[INFO] 拉取 LOF 实时行情（尝试 {attempt}/3）...")
-            df = ak.fund_lof_spot_em()
-            print(f"[INFO] 拉取完成，原始行数: {len(df)}")
-            break
-        except Exception as exc:
-            last_err = exc
-            if attempt < 3:
-                time.sleep(2)
-    else:
-        raise RuntimeError(f"拉取 LOF 实时行情失败（已重试 3 次）: {last_err}") from last_err
+def _fetch_lof_codes() -> pd.DataFrame:
+    """Get LOF fund list via akshare fund_name_em, filter to exchange-traded LOF codes."""
+    import re
+    df = ak.fund_name_em()
+    # Filter: name contains 'LOF' and code starts with 16/50/51 (exchange-traded)
+    lof = df[df["\u57fa\u91d1\u7b80\u79f0"].str.contains("LOF", case=False, na=False)].copy()
+    lof = lof[lof["\u57fa\u91d1\u4ee3\u7801"].str.match(r"^(16|50|51)\d{4}$")]
+    lof = lof.rename(columns={"\u57fa\u91d1\u4ee3\u7801": "code", "\u57fa\u91d1\u7b80\u79f0": "name"})
+    lof = lof[["code", "name"]].copy()
+    lof["code"] = lof["code"].astype(str).str.zfill(6)
+    # 排除定开基金（名称含"定开"或"定期开放"）
+    lof = lof[~lof["name"].str.contains(r"定开|定期开放", na=False)]
+    lof = lof.drop_duplicates("code")
+    return lof.reset_index(drop=True)
 
-    rename_map = {
-        "代码": "code",
-        "名称": "name",
-        "最新价": "price",
-        "IOPV实时估值": "iopv",
-    }
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+def _fetch_prices_tencent(codes: list) -> dict:
+    """Batch fetch real-time prices from Tencent qt.gtimg.cn.
+    Returns dict: code -> {"price": float, "volume": int}.
+    Only includes entries with price > 0 and volume > 0 (actually traded).
+    """
+    symbols = []
+    for c in codes:
+        c = str(c).zfill(6)
+        if c.startswith(("16", "15")):
+            symbols.append(f"sz{c}")
+        elif c.startswith(("50", "51")):
+            symbols.append(f"sh{c}")
+        else:
+            symbols.append(f"sz{c}")
+
+    result = {}
+    batch_size = 50
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
+        url = "https://qt.gtimg.cn/q=" + ",".join(batch)
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            for line in resp.text.strip().split("\n"):
+                line = line.strip().rstrip(";")
+                if "=" not in line:
+                    continue
+                _, val = line.split("=", 1)
+                val = val.strip('"')
+                parts = val.split("~")
+                if len(parts) < 7:
+                    continue
+                code = parts[2]
+                try:
+                    price = float(parts[3])
+                    volume = int(parts[6])
+                    if price > 0 and volume > 0:
+                        result[code.zfill(6)] = {"price": price, "volume": volume}
+                except (ValueError, IndexError):
+                    pass
+        except Exception as exc:
+            print(f"[WARN] Tencent batch {i} failed: {exc}")
+        if i + batch_size < len(symbols):
+            time.sleep(0.3)
+
+    return result
+
+
+def get_lof_df() -> pd.DataFrame:
+    """Fetch LOF real-time spot data using Tencent quotes + Eastmoney fund list."""
+    print("[INFO] 获取 LOF 基金列表...")
+    df = _fetch_lof_codes()
+    print(f"[INFO] LOF 基金列表: {len(df)} 只")
+
+    print("[INFO] 从腾讯行情获取实时价格...")
+    price_map = _fetch_prices_tencent(df["code"].tolist())
+    print(f"[INFO] 腾讯行情返回有成交的基金: {len(price_map)} 只")
+
+    df["price"] = df["code"].map(lambda c: price_map.get(c, {}).get("price"))
+    # 只保留有场内成交的
+    before_filter = len(df)
+    df = df.dropna(subset=["price"]).copy()
+    print(f"[INFO] 过滤无成交后: {len(df)} 只（排除 {before_filter - len(df)} 只）")
 
     required = {"code", "name", "price"}
     missing = required - set(df.columns)
